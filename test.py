@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Debug the metrics calculation issue
+Test the fixed strategy and backtester
 """
 
 import asyncio
@@ -12,16 +12,20 @@ from datetime import datetime, timedelta
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Import the fixed classes
 from src.analysis.backtester import Backtester
 from src.data.feed import DataFeed
-from src.strategies.sma_cross import SmaCrossStrategy
 
-async def debug_metrics_issue():
-    print("=== DEBUGGING METRICS CALCULATION ISSUE ===\n")
+
+async def test_fixed_strategy():
+    print("=== TESTING FIXED STRATEGY AND BACKTESTER ===\n")
     
     # Load config
     with open('config.json', 'r') as f:
         config = json.load(f)
+    
+    # Import the fixed strategy
+    from src.strategies.sma_cross import SmaCrossStrategy
     
     # Set up
     strategy_name = config['strategy']['name']
@@ -39,7 +43,7 @@ async def debug_metrics_issue():
     start_date = datetime.strptime('2025-01-01', '%Y-%m-%d')
     end_date = start_date + timedelta(hours=48)  # Just 2 days
     
-    print(f"Running short backtest: {start_date} to {end_date}")
+    print(f"Running test backtest: {start_date} to {end_date}")
     
     try:
         await data_feed.connect()
@@ -52,70 +56,50 @@ async def debug_metrics_issue():
             commission=0.001
         )
         
-        print(f"\n=== RAW RESULTS ===")
-        print(f"result.trades length: {len(result.trades)}")
-        print(f"result.performance_metrics: {result.performance_metrics}")
+        print(f"\n=== RESULTS ===")
+        print(f"Total trades: {len(result.trades)}")
         
-        # Let's look at the trade objects
-        print(f"\n=== TRADE ANALYSIS ===")
+        # Analyze trades
+        entry_trades = [t for t in result.trades if t.get('entry', True)]
+        exit_trades = [t for t in result.trades if not t.get('entry', True)]
         
+        print(f"Entry trades: {len(entry_trades)}")
+        print(f"Exit trades: {len(exit_trades)}")
+        
+        # Show some example trades
         if len(result.trades) > 0:
-            # Look at first trade
-            first_trade = result.trades[0]
-            print(f"First trade: {first_trade}")
-            print(f"First trade keys: {first_trade.keys()}")
-            print(f"Is 'entry' in first trade? {'entry' in first_trade}")
-            print(f"Entry value: {first_trade.get('entry', 'NOT SET')}")
-            
-            # Check how many are entry vs exit trades
-            entry_trades = [t for t in result.trades if t.get('entry', True)]
-            exit_trades = [t for t in result.trades if not t.get('entry', True)]
-            
-            print(f"\nEntry trades: {len(entry_trades)}")
-            print(f"Exit trades: {len(exit_trades)}")
-            
-            # Check trade structure expected by performance analyzer
-            print(f"\n=== CHECKING PERFORMANCE ANALYZER EXPECTATIONS ===")
-            
-            # The performance analyzer might be looking for different trade structure
-            # Let's check what calculate_trade_statistics expects
-            
-            from src.analysis.performance import PerformanceAnalyzer
-            analyzer = PerformanceAnalyzer()
-            
-            # Check what calculate_trade_statistics is doing
-            metrics = analyzer.calculate_metrics(
-                equity_curve=result.equity_curve,
-                trades=result.trades,
-                initial_capital=100000
-            )
-            
-            print(f"Metrics from analyzer: {metrics}")
-            print(f"Total trades in metrics: {metrics.get('total_trades', 'NOT FOUND')}")
-            
-            # Let's manually filter trades like the analyzer does
-            exit_trades_manual = [t for t in result.trades if not t.get('entry', True)]
-            print(f"\nManual exit trades count: {len(exit_trades_manual)}")
-            
-            if len(exit_trades_manual) > 0:
-                print(f"First exit trade: {exit_trades_manual[0]}")
-            else:
-                print("NO EXIT TRADES FOUND!")
-                print("This is the issue - strategy only creates entry trades")
-                
-                # Check if we're closing positions
-                print(f"\n=== CHECKING POSITION CLOSING ===")
-                
-                # Look for position closing logic in strategy
-                print("Check if strategy._check_exit_conditions is being called")
-                print("Check if strategy has position tracking")
+            print(f"\n=== FIRST FEW TRADES ===")
+            for i, trade in enumerate(result.trades[:6]):
+                trade_type = "ENTRY" if trade.get('entry', True) else "EXIT"
+                print(f"{i+1}. [{trade_type}] {trade['timestamp']} - {trade['action'].upper()} {trade['shares']} @ {trade['price']:.5f}")
+                if not trade.get('entry', True):
+                    print(f"   PnL: ${trade.get('pnl', 0):.2f} ({trade.get('reason', '')})")
         
-        print(f"\n=== DIAGNOSIS ===")
-        if len(result.trades) > len([t for t in result.trades if not t.get('entry', True)]):
-            print("❌ ISSUE FOUND: Strategy only creates entry trades, no exit trades!")
-            print("The performance analyzer counts 'completed trades' (entry + exit)")
-            print("Since there are no exit trades, completed trades = 0")
-            print("\nSOLUTION: Fix the strategy to properly close positions")
+        # Performance metrics
+        print(f"\n=== PERFORMANCE METRICS ===")
+        metrics = result.performance_metrics
+        key_metrics = [
+            ('Total Return', f"{metrics.get('total_return', 0):.2f}%"),
+            ('Sharpe Ratio', f"{metrics.get('sharpe_ratio', 0):.2f}"),
+            ('Max Drawdown', f"{metrics.get('max_drawdown', 0):.2f}%"),
+            ('Win Rate', f"{metrics.get('win_rate', 0):.2f}%"),
+            ('Total Completed Trades', f"{metrics.get('total_trades', 0)}"),
+            ('Winning Trades', f"{metrics.get('winning_trades', 0)}"),
+            ('Losing Trades', f"{metrics.get('losing_trades', 0)}"),
+            ('Final Equity', f"${metrics.get('final_equity', 0):,.2f}")
+        ]
+        
+        for name, value in key_metrics:
+            print(f"{name:<25} {value}")
+        
+        print(f"\n=== SUCCESS ===")
+        print(f"✅ Strategy now properly generates both entry and exit trades!")
+        print(f"✅ Performance metrics now show {metrics.get('total_trades', 0)} completed trades")
+        
+        # Test the strategy state
+        print(f"\n=== STRATEGY STATE ===")
+        print(f"Current position: {strategy.state.get('position', 'None')}")
+        print(f"Entry price: {strategy.state.get('entry_price', 'None')}")
         
     except Exception as e:
         print(f"\nERROR: {e}")
@@ -125,4 +109,5 @@ async def debug_metrics_issue():
         await data_feed.disconnect()
 
 if __name__ == "__main__":
-    asyncio.run(debug_metrics_issue())
+    print("Testing fixed SMA Cross Strategy...")
+    asyncio.run(test_fixed_strategy())

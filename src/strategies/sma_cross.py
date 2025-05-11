@@ -47,10 +47,11 @@ class SmaCrossStrategy(BaseStrategy):
         
         # Initialize state
         self.state = {
-            'position': None,
+            'position': None,  # 'long', 'short', or None
             'entry_price': None,
             'entry_time': None,
-            'last_signal': None
+            'last_signal': None,
+            'position_type': None  # Track if position is from golden/death cross
         }
     
     async def _update_indicators(self, market_data):
@@ -89,57 +90,100 @@ class SmaCrossStrategy(BaseStrategy):
                 metadata={'reason': 'Insufficient data'}
             )
         
-        # Golden Cross - Bullish signal
-        if cross_detector.bullish_cross:
-            stop_loss = market_data.close - (atr * self.parameters['stop_loss_atr'])
-            take_profit = market_data.close + (atr * self.parameters['take_profit_atr'])
+        # Check if we need to exit existing position first
+        if self.state['position'] is not None:
+            # Exit long position on death cross
+            if self.state['position'] == 'long' and cross_detector.bearish_cross:
+                return Signal(
+                    action='sell',
+                    strength=1.0,  # Exit signals should be strong
+                    price=market_data.close,
+                    symbol=market_data.symbol,
+                    timestamp=market_data.timestamp,
+                    metadata={
+                        'reason': 'Death Cross - Exit Long',
+                        'entry_price': self.state['entry_price'],
+                        'fast_sma': fast_sma,
+                        'slow_sma': slow_sma,
+                        'pnl': market_data.close - self.state['entry_price'] if self.state['entry_price'] else 0
+                    }
+                )
             
-            # Calculate signal strength based on gap between SMAs
-            gap_pct = (fast_sma - slow_sma) / slow_sma * 100
-            strength = min(max(gap_pct / 2, 0.5), 1.0)
+            # Exit short position on golden cross
+            elif self.state['position'] == 'short' and cross_detector.bullish_cross:
+                return Signal(
+                    action='buy',  # Buy to close short
+                    strength=1.0,
+                    price=market_data.close,
+                    symbol=market_data.symbol,
+                    timestamp=market_data.timestamp,
+                    metadata={
+                        'reason': 'Golden Cross - Exit Short',
+                        'entry_price': self.state['entry_price'],
+                        'fast_sma': fast_sma,
+                        'slow_sma': slow_sma,
+                        'pnl': self.state['entry_price'] - market_data.close if self.state['entry_price'] else 0
+                    }
+                )
             
-            return Signal(
-                action='buy',
-                strength=strength,
-                price=market_data.close,
-                symbol=market_data.symbol,
-                timestamp=market_data.timestamp,
-                metadata={
-                    'fast_sma': fast_sma,
-                    'slow_sma': slow_sma,
-                    'atr': atr,
-                    'stop_loss': stop_loss,
-                    'take_profit': take_profit,
-                    'reason': 'Golden Cross',
-                    'gap_pct': gap_pct
-                }
-            )
+            # Check stop loss and take profit
+            exit_signal = await self._check_exit_conditions(market_data)
+            if exit_signal:
+                return exit_signal
         
-        # Death Cross - Bearish signal
-        elif cross_detector.bearish_cross:
-            stop_loss = market_data.close + (atr * self.parameters['stop_loss_atr'])
-            take_profit = market_data.close - (atr * self.parameters['take_profit_atr'])
+        # Only generate entry signals if we don't have a position
+        if self.state['position'] is None:
+            # Golden Cross - Bullish signal
+            if cross_detector.bullish_cross:
+                stop_loss = market_data.close - (atr * self.parameters['stop_loss_atr'])
+                take_profit = market_data.close + (atr * self.parameters['take_profit_atr'])
+                
+                # Calculate signal strength based on gap between SMAs
+                gap_pct = (fast_sma - slow_sma) / slow_sma * 100
+                strength = min(max(gap_pct / 2, 0.5), 1.0)
+                
+                return Signal(
+                    action='buy',
+                    strength=strength,
+                    price=market_data.close,
+                    symbol=market_data.symbol,
+                    timestamp=market_data.timestamp,
+                    metadata={
+                        'fast_sma': fast_sma,
+                        'slow_sma': slow_sma,
+                        'atr': atr,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'reason': 'Golden Cross - Enter Long',
+                        'gap_pct': gap_pct
+                    }
+                )
             
-            # Calculate signal strength based on gap between SMAs
-            gap_pct = (slow_sma - fast_sma) / slow_sma * 100
-            strength = min(max(gap_pct / 2, 0.5), 1.0)
-            
-            return Signal(
-                action='sell',
-                strength=strength,
-                price=market_data.close,
-                symbol=market_data.symbol,
-                timestamp=market_data.timestamp,
-                metadata={
-                    'fast_sma': fast_sma,
-                    'slow_sma': slow_sma,
-                    'atr': atr,
-                    'stop_loss': stop_loss,
-                    'take_profit': take_profit,
-                    'reason': 'Death Cross',
-                    'gap_pct': gap_pct
-                }
-            )
+            # Death Cross - Bearish signal
+            elif cross_detector.bearish_cross:
+                stop_loss = market_data.close + (atr * self.parameters['stop_loss_atr'])
+                take_profit = market_data.close - (atr * self.parameters['take_profit_atr'])
+                
+                # Calculate signal strength based on gap between SMAs
+                gap_pct = (slow_sma - fast_sma) / slow_sma * 100
+                strength = min(max(gap_pct / 2, 0.5), 1.0)
+                
+                return Signal(
+                    action='sell',
+                    strength=strength,
+                    price=market_data.close,
+                    symbol=market_data.symbol,
+                    timestamp=market_data.timestamp,
+                    metadata={
+                        'fast_sma': fast_sma,
+                        'slow_sma': slow_sma,
+                        'atr': atr,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'reason': 'Death Cross - Enter Short',
+                        'gap_pct': gap_pct
+                    }
+                )
         
         # No signal - Hold
         return Signal(
@@ -152,7 +196,8 @@ class SmaCrossStrategy(BaseStrategy):
                 'fast_sma': fast_sma,
                 'slow_sma': slow_sma,
                 'atr': atr,
-                'reason': 'No crossover detected'
+                'reason': 'No crossover detected',
+                'position': self.state['position']
             }
         )
     
@@ -242,29 +287,45 @@ class SmaCrossStrategy(BaseStrategy):
     async def update(self, market_data) -> Optional[Signal]:
         """
         Update strategy with new market data
-        Override parent method to include exit checks
+        This method properly handles position state management
         """
-        # First check exit conditions for existing position
-        exit_signal = await self._check_exit_conditions(market_data)
-        if exit_signal:
-            # Update position state on exit
-            self.state['position'] = None
-            self.state['entry_price'] = None
-            self.state['entry_time'] = None
-            return exit_signal
+        # Update indicators first
+        await self._update_indicators(market_data)
         
-        # Call parent update for indicator updates and signal generation
-        signal = await super().update(market_data)
+        # Get signal (which checks both exits and entries)
+        signal = await self._generate_signal(market_data)
         
-        # Update position state on entry
-        if signal and signal.action in ['buy', 'sell']:
+        # Update position state based on signal
+        if signal and signal.action != 'hold':
             if signal.action == 'buy':
-                self.state['position'] = 'long'
-            elif signal.action == 'sell':
-                self.state['position'] = 'short'
+                if self.state['position'] == 'short':
+                    # Closing short position
+                    self.state['position'] = None
+                    self.state['entry_price'] = None
+                    self.state['entry_time'] = None
+                elif self.state['position'] is None:
+                    # Opening long position
+                    self.state['position'] = 'long'
+                    self.state['entry_price'] = signal.price
+                    self.state['entry_time'] = signal.timestamp
             
-            self.state['entry_price'] = signal.price
-            self.state['entry_time'] = signal.timestamp
+            elif signal.action == 'sell':
+                if self.state['position'] == 'long':
+                    # Closing long position
+                    self.state['position'] = None
+                    self.state['entry_price'] = None
+                    self.state['entry_time'] = None
+                elif self.state['position'] is None:
+                    # Opening short position
+                    self.state['position'] = 'short'
+                    self.state['entry_price'] = signal.price
+                    self.state['entry_time'] = signal.timestamp
+        
+        # Call parent's tracking methods
+        if signal:
+            self._update_performance_tracking(signal)
+            await self._log_signal(signal, market_data)
+            signal = self._post_process_signal(signal, market_data)
         
         return signal
 
@@ -450,3 +511,19 @@ class TripleSmaCrossStrategy(BaseStrategy):
         
         strength = min(avg_gap / max_gap, 1.0)
         return max(strength, 0.5)  # Minimum strength of 0.5
+
+
+# Helper function for debugging
+def get_strategy_status(strategy):
+    """Get current strategy status for debugging"""
+    return {
+        'position': strategy.state.get('position'),
+        'entry_price': strategy.state.get('entry_price'),
+        'entry_time': strategy.state.get('entry_time'),
+        'last_signal': strategy.state.get('last_signal'),
+        'indicators': {
+            'fast_sma': strategy.indicators['fast_sma'].value if 'fast_sma' in strategy.indicators else None,
+            'slow_sma': strategy.indicators['slow_sma'].value if 'slow_sma' in strategy.indicators else None,
+            'atr': strategy.indicators['atr'].value if 'atr' in strategy.indicators else None
+        }
+    }

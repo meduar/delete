@@ -48,6 +48,9 @@ class Backtester:
         self.daily_returns = []
         self.positions_history = []
         
+        # Keep track of open positions for proper exit handling
+        self.open_positions = {}  # symbol -> position_info
+        
     async def run(
         self,
         strategy: BaseStrategy,
@@ -103,7 +106,7 @@ class Backtester:
                     await self._process_signal(signal, market_data, strategy)
                 
                 # Update portfolio value and equity curve
-                current_prices = {signal.symbol if signal else 'EUR_USD': market_data.close}
+                current_prices = {signal.symbol if signal else strategy.parameters.get('symbol', 'EUR_USD'): market_data.close}
                 self._update_equity_curve(idx, current_prices)
                 
                 # Track daily returns for analysis
@@ -113,6 +116,9 @@ class Backtester:
                         daily_return = self._calculate_daily_return()
                         self.daily_returns.append(daily_return)
                     prev_date = current_date
+            
+            # Close any remaining open positions at the end
+            await self._close_all_positions(market_data, strategy)
             
             # Calculate final metrics
             execution_time = (datetime.now() - start_time).total_seconds()
@@ -138,70 +144,161 @@ class Backtester:
         )
     
     async def _process_signal(self, signal: Signal, market_data, strategy: BaseStrategy):
-        """Process a trading signal"""
+        """Process a trading signal with proper entry/exit handling"""
         try:
-            # Calculate position size
-            if signal.action == 'buy':
-                position_size = self.portfolio.calculate_position_size(signal, market_data.close)
-                
-                # Check if we have enough cash
-                cost = position_size * market_data.close * (1 + self.commission + self.slippage)
-                if cost <= self.portfolio.cash:
-                    # Open position
-                    stop_loss = signal.metadata.get('stop_loss')
-                    take_profit = signal.metadata.get('take_profit')
-                    
-                    position_id = self.portfolio.open_position(
-                        symbol=signal.symbol,
-                        entry_price=market_data.close * (1 + self.slippage),
-                        quantity=position_size,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit
-                    )
-                    
-                    # Record trade entry
-                    self.trades.append({
-                        'timestamp': signal.timestamp,
-                        'symbol': signal.symbol,
-                        'action': 'buy',
-                        'price': market_data.close * (1 + self.slippage),
-                        'shares': position_size,
-                        'commission': position_size * market_data.close * self.commission,
-                        'position_id': position_id,
-                        'entry': True,
-                        'strategy': strategy.name,
-                        'signal_strength': signal.strength
-                    })
-                
-            elif signal.action == 'sell':
-                # Close existing position
-                if signal.symbol in self.portfolio.positions:
-                    exit_price = market_data.close * (1 - self.slippage)
-                    trade_result = self.portfolio.close_position(signal.symbol, exit_price)
-                    
-                    # Record trade exit
-                    position = self.portfolio.positions.get(signal.symbol)
-                    if position:
-                        commission = abs(position.quantity) * exit_price * self.commission
-                        pnl = trade_result['pnl'] - commission
-                        
-                        self.trades.append({
-                            'timestamp': signal.timestamp,
-                            'symbol': signal.symbol,
-                            'action': 'sell',
-                            'price': exit_price,
-                            'shares': abs(position.quantity),
-                            'commission': commission,
-                            'position_id': position.position_id,
-                            'pnl': pnl,
-                            'pnl_percent': (pnl / position.cost_basis) * 100,
-                            'entry': False,
-                            'strategy': strategy.name,
-                            'hold_time': (signal.timestamp - position.entry_time).total_seconds()
-                        })
+            symbol = signal.symbol
+            action = signal.action
+            price = market_data.close
+            
+            # Calculate position size and cost
+            position_size = self.portfolio.calculate_position_size(signal, price)
+            cost = position_size * price * (1 + self.commission + self.slippage)
+            
+            # Handle different signal actions
+            if action == 'buy':
+                # Check if this is closing a short position or opening new long
+                if symbol in self.open_positions and self.open_positions[symbol]['direction'] == 'short':
+                    # Closing short position
+                    await self._close_position(symbol, price, 'buy_to_cover', signal, market_data, strategy)
+                else:
+                    # Opening long position (or adding to existing long)
+                    if cost <= self.portfolio.cash:
+                        await self._open_position(symbol, price, position_size, 'long', signal, market_data, strategy)
+            
+            elif action == 'sell':
+                # Check if this is closing a long position or opening new short
+                if symbol in self.open_positions and self.open_positions[symbol]['direction'] == 'long':
+                    # Closing long position
+                    await self._close_position(symbol, price, 'sell_to_close', signal, market_data, strategy)
+                else:
+                    # Opening short position
+                    await self._open_position(symbol, price, position_size, 'short', signal, market_data, strategy)
                 
         except Exception as e:
             self.logger.error(f"Error processing signal: {str(e)}")
+    
+    async def _open_position(self, symbol: str, price: float, quantity: int, direction: str, 
+                           signal: Signal, market_data, strategy: BaseStrategy):
+        """Open a new position"""
+        entry_price = price * (1 + self.slippage)
+        
+        # Calculate cost
+        cost = quantity * entry_price
+        commission = cost * self.commission
+        total_cost = cost + commission
+        
+        # Check if we have enough cash
+        if total_cost <= self.portfolio.cash:
+            # Update portfolio
+            if direction == 'long':
+                position_id = self.portfolio.open_position(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    quantity=quantity,
+                    stop_loss=signal.metadata.get('stop_loss'),
+                    take_profit=signal.metadata.get('take_profit')
+                )
+            else:  # short
+                position_id = self.portfolio.open_position(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    quantity=-quantity,  # Negative for short
+                    stop_loss=signal.metadata.get('stop_loss'),
+                    take_profit=signal.metadata.get('take_profit')
+                )
+            
+            # Track position
+            self.open_positions[symbol] = {
+                'direction': direction,
+                'entry_price': entry_price,
+                'quantity': quantity,
+                'entry_time': signal.timestamp,
+                'position_id': position_id
+            }
+            
+            # Record trade entry
+            self.trades.append({
+                'timestamp': signal.timestamp,
+                'symbol': symbol,
+                'action': 'buy' if direction == 'long' else 'sell',
+                'price': entry_price,
+                'shares': quantity,
+                'commission': commission,
+                'position_id': position_id,
+                'entry': True,
+                'strategy': signal.metadata.get('strategy_name', strategy.name),
+                'signal_strength': signal.strength,
+                'reason': signal.metadata.get('reason', '')
+            })
+    
+    async def _close_position(self, symbol: str, price: float, close_type: str, 
+                            signal: Signal, market_data, strategy: BaseStrategy):
+        """Close an existing position"""
+        if symbol not in self.open_positions:
+            return
+        
+        position_info = self.open_positions[symbol]
+        exit_price = price * (1 - self.slippage)
+        
+        # Get position from portfolio
+        portfolio_position = self.portfolio.positions.get(symbol)
+        if not portfolio_position:
+            return
+        
+        # Calculate P&L
+        entry_price = position_info['entry_price']
+        quantity = position_info['quantity']
+        
+        if position_info['direction'] == 'long':
+            pnl = (exit_price - entry_price) * quantity
+        else:  # short
+            pnl = (entry_price - exit_price) * quantity
+        
+        # Close position in portfolio
+        try:
+            trade_result = self.portfolio.close_position(symbol, exit_price)
+            commission = abs(portfolio_position.quantity) * exit_price * self.commission
+            net_pnl = pnl - commission
+            
+            # Record trade exit
+            self.trades.append({
+                'timestamp': signal.timestamp,
+                'symbol': symbol,
+                'action': 'sell' if position_info['direction'] == 'long' else 'buy',
+                'price': exit_price,
+                'shares': abs(quantity),
+                'commission': commission,
+                'position_id': position_info['position_id'],
+                'pnl': net_pnl,
+                'pnl_percent': (net_pnl / (entry_price * abs(quantity))) * 100,
+                'entry': False,
+                'strategy': signal.metadata.get('strategy_name', strategy.name),
+                'signal_strength': signal.strength,
+                'hold_time': (signal.timestamp - position_info['entry_time']).total_seconds(),
+                'reason': signal.metadata.get('reason', ''),
+                'entry_price': entry_price
+            })
+            
+            # Remove from tracking
+            del self.open_positions[symbol]
+            
+        except Exception as e:
+            self.logger.error(f"Error closing position for {symbol}: {e}")
+    
+    async def _close_all_positions(self, market_data, strategy: BaseStrategy):
+        """Close all open positions at the end of backtest"""
+        for symbol in list(self.open_positions.keys()):
+            # Create a fake exit signal
+            fake_signal = Signal(
+                action='sell' if self.open_positions[symbol]['direction'] == 'long' else 'buy',
+                strength=1.0,
+                price=market_data.close,
+                symbol=symbol,
+                timestamp=market_data.timestamp,
+                metadata={'reason': 'End of backtest'}
+            )
+            
+            await self._close_position(symbol, market_data.close, 'end_of_backtest', fake_signal, market_data, strategy)
     
     def _update_equity_curve(self, timestamp, current_prices: Dict[str, float]):
         """Update equity curve with current portfolio value"""

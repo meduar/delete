@@ -23,11 +23,11 @@
     "name": "sma_cross",
     "symbol": "EUR_USD",
     "parameters": {
-      "fast_period": 5,
-      "slow_period": 15,
-      "atr_period": 14,
-      "stop_loss_atr": 1.5,
-      "take_profit_atr": 3.0
+        "fast_period": 10,
+        "slow_period": 30, 
+        "atr_period": 14,
+        "stop_loss_atr": 1.5,
+        "take_profit_atr": 3.0
     }
   },
   "backtest": {
