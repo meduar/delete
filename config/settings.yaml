@@ -1,0 +1,29 @@
+
+trading:
+  initial_cash: 30000
+  max_position_size: 0.1  # 10% of portfolio
+  max_daily_loss: -300
+  max_trades_per_day: 10
+
+oanda:
+  environment: "practice"
+  api_key: "${OANDA_API_KEY}"
+  account_id: "${OANDA_ACCOUNT_ID}"
+
+strategies:
+  sma_cross:
+    fast_period: 10
+    slow_period: 30
+    atr_period: 14
+    stop_loss_atr: 1.5
+    take_profit_atr: 3.0
+
+monitoring:
+  telegram:
+    enabled: true
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
+  
+  logging:
+    level: "INFO"
+    file: "logs/trading.log"
